@@ -9,6 +9,7 @@
 #include <vector>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <utility>
 
 #include "ThreadPool.hpp"
 #include "Logger.hpp"
@@ -40,7 +41,15 @@ public:
         }
     };
 
-    using Route = std::function<Response(const std::string&)>;
+    enum class HttpMethod {
+        GET,
+        POST,
+        PUT,
+        DELETE
+    };
+
+    using RouteHandler = std::function<Response(const std::string&)>;
+    using RouteKey = std::pair<std::string, HttpMethod>; // The key is now a path-method pair
 
     WebServer(int port, size_t threads) : server_fd(-1), port(port), thread_pool(threads) {
         Setup();
@@ -50,8 +59,8 @@ public:
         if (server_fd != -1) close(server_fd);
     }
 
-    void AddRoute(const std::string& path, const Route& route) {
-        routes[path] = route;
+    void AddRoute(HttpMethod method, const std::string& path, const RouteHandler& handler) {
+        routes[{path, method}] = handler;
     }
 
     std::string getHostIPAddress() {
@@ -99,11 +108,20 @@ public:
     }
 
 private:
+    struct pair_hash {
+        template <class T1, class T2>
+        std::size_t operator () (const std::pair<T1, T2>& pair) const {
+            auto hash1 = std::hash<T1>{}(pair.first);
+            auto hash2 = std::hash<T2>{}(pair.second);
+            return hash1 ^ hash2;
+        }
+    };
+    
     int server_fd;
     int port;
     bool debugMode = false;
     ThreadPool thread_pool;
-    std::unordered_map<std::string, Route> routes;
+    std::unordered_map<RouteKey, RouteHandler, pair_hash> routes;
 
     void Setup() {
         if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
@@ -144,8 +162,7 @@ private:
         return request.substr(start, end - start);
     }
 
-    void HandleConnection(int socket)
-    {
+    void HandleConnection(int socket) {
         bool keep_alive;
         do {
             std::vector<char> buffer;
@@ -153,45 +170,66 @@ private:
             size_t total_bytes_read = 0;
             ssize_t bytes_read;
 
+            // Read from the socket until the header is fully received
             do {
                 buffer.resize(total_bytes_read + buffer_size);
                 bytes_read = read(socket, buffer.data() + total_bytes_read, buffer_size);
                 if (bytes_read > 0) total_bytes_read += bytes_read;
             } while (bytes_read > 0 && BufferContainsIncompleteHeader(buffer));
 
+            // If there's an error reading from the socket, exit the function
             if (bytes_read < 0) {
                 perror("read");
                 close(socket);
                 return;
             }
 
+            // Convert the buffer to a string for easier processing
             std::string request(buffer.begin(), buffer.begin() + total_bytes_read);
-            if (debugMode) std::cout << request << std::endl; 
+            if (debugMode) std::cout << request << std::endl;
 
-        // Simple parsing to extract the path
-        size_t start = request.find("GET /") + 4;
-        size_t end = request.find(" ", start);
-        std::string path = request.substr(start, end - start);
+            // Extract the request method and path from the request line
+            size_t method_end = request.find(' ');
+            std::string method_str = request.substr(0, method_end);
+            HttpMethod method;
+            if (method_str == "GET") method = HttpMethod::GET;
+            else if (method_str == "POST") method = HttpMethod::POST;
+            else if (method_str == "PUT") method = HttpMethod::PUT;
+            else if (method_str == "DELETE") method = HttpMethod::DELETE;
+            else {
+                // Handle unknown methods
+                close(socket);
+                return;
+            }
 
-        // Find the route
-        auto it = routes.find(path);
-        Response response;
-            if (it != routes.end()) {
-                response = it->second(request);
+            size_t path_start = request.find(' ', method_end) + 1;
+            size_t path_end = request.find(' ', path_start);
+            std::string path = request.substr(path_start, path_end - path_start);
+
+            // Find the handler for the route based on method and path
+            RouteKey route_key = {path, method};
+            auto route_it = routes.find(route_key);
+            Response response;
+            if (route_it != routes.end()) {
+                // If the route is found, call the associated handler
+                response = route_it->second(request);
             } else {
+                // Return a 404 Not Found response if no route is matched
                 response.status_line = "HTTP/1.1 404 Not Found";
                 response.headers["Content-Type"] = "text/html";
-                response.headers["Content-Length"] = "9";
                 response.body = "Not Found";
             }
 
+            // Check if the client has requested to keep the connection alive
             keep_alive = GetHeaderValue(request, "Connection") == "keep-alive";
             if (keep_alive) response.headers["Connection"] = "keep-alive";
 
+            // Send the response back to the client
             std::string response_str = response.ToString();
             send(socket, response_str.c_str(), response_str.size(), 0);
         } while (keep_alive);
 
+        // Close the socket after handling the connection
         close(socket);
     }
 };
@@ -200,7 +238,7 @@ int main() {
     WebServer server(8080, 4);
     
     // Add a route for the index page
-    server.AddRoute("/", [](const std::string& request) -> WebServer::Response {
+    server.AddRoute(WebServer::HttpMethod::GET, "/", [](const std::string& request) -> WebServer::Response {
         WebServer::Response response;
         response.status_line = "HTTP/1.1 200 OK";
         response.headers["Content-Type"] = "text/html";
