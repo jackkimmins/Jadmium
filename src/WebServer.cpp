@@ -13,26 +13,54 @@
 
 #include "ThreadPool.hpp"
 #include "Logger.hpp"
+#include "HTTPStatus.hpp"
 
 class WebServer {
 public:
     struct Response {
+    private:
         std::string status_line;
         std::unordered_map<std::string, std::string> headers;
         std::string body;
 
+        void SetStatusLine(int code) {
+            auto it = HTTP_STATUS.find(code);
+            if (it == HTTP_STATUS.end()) code = 510;
+
+            status_line = "HTTP/1.1 " + std::to_string(code) + " " + HTTP_STATUS.at(code);
+        }
+
+    public:
+        Response() {
+            SetStatusCode(200);
+            AddHeader("Content-Type", "text/html");
+            AddHeader("Server", "Jadmium");
+        }
+
+        void SetStatusCode(int code) {
+            SetStatusLine(code);
+        }
+
+        void Redirect(const std::string& url, bool permanent = false) {
+            SetStatusCode(permanent ? 301 : 302);
+            AddHeader("Location", url);
+        }
+
+        void AddHeader(const std::string& key, const std::string& value) {
+            headers[key] = value;
+        }
+
+        void SetBody(const std::string& bodyContent) {
+            body = bodyContent;
+        }
+
         std::string ToString() const {
             std::string response = status_line + "\r\n";
-            bool has_content_length = false;
-
             for (const auto& [key, value] : headers) {
                 response += key + ": " + value + "\r\n";
-                if (key == "Content-Length" || key == "content-length") {
-                    has_content_length = true;
-                }
             }
 
-            if (!has_content_length && !body.empty()) {
+            if (headers.find("Content-Length") == headers.end() && !body.empty()) {
                 response += "Content-Length: " + std::to_string(body.size()) + "\r\n";
             }
 
@@ -41,15 +69,8 @@ public:
         }
     };
 
-    enum class HttpMethod {
-        GET,
-        POST,
-        PUT,
-        DELETE
-    };
-
-    using RouteHandler = std::function<Response(const std::string&)>;
-    using RouteKey = std::pair<std::string, HttpMethod>; // The key is now a path-method pair
+    using RouteHandler = std::function<void(const std::string&, Response&)>;
+    using RouteKey = std::pair<std::string, HttpMethod>;
 
     WebServer(int port, size_t threads) : server_fd(-1), port(port), thread_pool(threads) {
         Setup();
@@ -116,10 +137,10 @@ private:
             return hash1 ^ hash2;
         }
     };
-    
+
     int server_fd;
     int port;
-    bool debugMode = false;
+    bool debugMode = true;
     ThreadPool thread_pool;
     std::unordered_map<RouteKey, RouteHandler, pair_hash> routes;
 
@@ -150,8 +171,7 @@ private:
         return it == buffer.end();
     }
 
-    static std::string GetHeaderValue(const std::string& request, const std::string& header_name)
-    {
+    static std::string GetHeaderValue(const std::string& request, const std::string& header_name) {
         size_t start = request.find(header_name + ":");
         if (start == std::string::npos) return "";
 
@@ -164,6 +184,8 @@ private:
 
     void HandleConnection(int socket) {
         bool keep_alive;
+        Response response;
+
         do {
             std::vector<char> buffer;
             const size_t buffer_size = 1024;
@@ -209,23 +231,25 @@ private:
             // Find the handler for the route based on method and path
             RouteKey route_key = {path, method};
             auto route_it = routes.find(route_key);
-            Response response;
             if (route_it != routes.end()) {
-                // If the route is found, call the associated handler
-                response = route_it->second(request);
+                // Call the associated handler, which now expects a Response reference
+                route_it->second(request, response);
+                
+                // Send the response back to the client
+                std::string response_str = response.ToString();
+                if (debugMode) std::cout << response_str << std::endl;
+                send(socket, response_str.c_str(), response_str.size(), 0);
             } else {
-                // Return a 404 Not Found response if no route is matched
-                response.status_line = "HTTP/1.1 404 Not Found";
-                response.headers["Content-Type"] = "text/html";
-                response.body = "Not Found";
+                // Handle unknown routes or methods
             }
 
             // Check if the client has requested to keep the connection alive
             keep_alive = GetHeaderValue(request, "Connection") == "keep-alive";
-            if (keep_alive) response.headers["Connection"] = "keep-alive";
+            if (keep_alive) response.AddHeader("Connection", "keep-alive");
 
             // Send the response back to the client
             std::string response_str = response.ToString();
+            if (debugMode) std::cout << response_str << std::endl;
             send(socket, response_str.c_str(), response_str.size(), 0);
         } while (keep_alive);
 
@@ -238,12 +262,9 @@ int main() {
     WebServer server(8080, 4);
     
     // Add a route for the index page
-    server.AddRoute(WebServer::HttpMethod::GET, "/", [](const std::string& request) -> WebServer::Response {
-        WebServer::Response response;
-        response.status_line = "HTTP/1.1 200 OK";
-        response.headers["Content-Type"] = "text/html";
-        response.body = "Hello, world!";
-        return response;
+    server.AddRoute(HttpMethod::GET, "/", [](auto& req, auto& res) {
+        res.SetStatusCode(200);
+        res.SetBody("Hello, world!");
     });
     
     server.Run();
