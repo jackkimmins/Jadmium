@@ -1,12 +1,12 @@
 CXX = g++
-CXXFLAGS = -std=c++20 -Wall -O2
+CXXFLAGS = -std=c++20 -Wall -O3
 SRC_DIR = src
 BUILD_DIR = build
 CPP_SOURCES = $(wildcard $(SRC_DIR)/*.cpp)
 HPP_HEADERS = $(wildcard $(SRC_DIR)/*.hpp)
 OBJECTS = $(CPP_SOURCES:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
 BINARY = $(BUILD_DIR)/webserver
-LIBS = -lpthread
+LIBS = -lpthread -lz
 $(shell mkdir -p $(BUILD_DIR))
 
 all: $(BINARY)

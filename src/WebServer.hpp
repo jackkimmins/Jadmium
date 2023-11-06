@@ -10,6 +10,7 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <utility>
+#include <zlib.h>
 
 #include "ThreadPool.hpp"
 #include "Logger.hpp"
@@ -23,6 +24,7 @@ public:
         std::unordered_map<std::string, std::string> headers;
         std::string body;
 
+        // Set the status line based on the status code
         void SetStatusLine(int code) {
             auto it = HTTP_STATUS.find(code);
             if (it == HTTP_STATUS.end()) code = 510;
@@ -37,23 +39,28 @@ public:
             AddHeader("Server", "Jadmium");
         }
 
+        // Set the status code of the response
         void SetStatusCode(int code) {
             SetStatusLine(code);
         }
 
+        // Redirect to another URL
         void Redirect(const std::string& url, bool permanent = false) {
             SetStatusCode(permanent ? 301 : 302);
             AddHeader("Location", url);
         }
 
+        // Set a HTTP Response header
         void AddHeader(const std::string& key, const std::string& value) {
             headers[key] = value;
         }
 
+        // Set the body of the response
         void SetBody(const std::string& bodyContent) {
             body = bodyContent;
         }
 
+        // Get the response as a string
         std::string ToString() const {
             std::string response = status_line + "\r\n";
             for (const auto& [key, value] : headers) {
@@ -69,6 +76,7 @@ public:
         }
     };
 
+    // Takes a request and response object
     using RouteHandler = std::function<void(const std::string&, Response&)>;
     using RouteKey = std::pair<std::string, HttpMethod>;
 
@@ -80,11 +88,12 @@ public:
         if (server_fd != -1) close(server_fd);
     }
 
+    // Add a route to the server
     void AddRoute(HttpMethod method, const std::string& path, const RouteHandler& handler) {
         routes[{path, method}] = handler;
     }
 
-    std::string getHostIPAddress() {
+    std::string GetHostIPAddress() {
         char hostbuffer[256];
         char *IPbuffer;
         struct hostent *host_entry;
@@ -104,15 +113,14 @@ public:
             exit(EXIT_FAILURE);
         }
 
-        // To convert an Internet network
-        // address into ASCII string
+        // To convert an Internet network address into ASCII string
         IPbuffer = inet_ntoa(*((struct in_addr*)host_entry->h_addr_list[0]));
-
         return IPbuffer;
     }
 
+    // Start the server
     void Run() {
-        std::string ip = getHostIPAddress();
+        std::string ip = GetHostIPAddress();
         Logger::log("Jadmium Server is running at http://" + ip + ":" + std::to_string(port), Logger::Level::INFO);
 
         while (true) {
@@ -140,7 +148,7 @@ private:
 
     int server_fd;
     int port;
-    bool debugMode = true;
+    bool debugMode = false;
     ThreadPool thread_pool;
     std::unordered_map<RouteKey, RouteHandler, pair_hash> routes;
 
@@ -257,16 +265,3 @@ private:
         close(socket);
     }
 };
-
-int main() {
-    WebServer server(8080, 4);
-    
-    // Add a route for the index page
-    server.AddRoute(HttpMethod::GET, "/", [](auto& req, auto& res) {
-        res.SetStatusCode(200);
-        res.SetBody("Hello, world!");
-    });
-    
-    server.Run();
-    return 0;
-}
