@@ -190,78 +190,82 @@ private:
         return request.substr(start, end - start);
     }
 
+    void ReadRequest(int socket, std::string& request) {
+        std::vector<char> buffer;
+        const size_t buffer_size = 1024;
+        size_t total_bytes_read = 0;
+        ssize_t bytes_read;
+
+        do {
+            buffer.resize(total_bytes_read + buffer_size);
+            bytes_read = read(socket, buffer.data() + total_bytes_read, buffer_size);
+            if (bytes_read > 0) total_bytes_read += bytes_read;
+        } while (bytes_read > 0 && BufferContainsIncompleteHeader(buffer));
+
+        if (bytes_read < 0) {
+            perror("read");
+            close(socket);
+            request = ""; // return an empty string to indicate failure
+        } else {
+            request.assign(buffer.begin(), buffer.begin() + total_bytes_read);
+        }
+    }
+
+    void ParseRequest(const std::string& request, HttpMethod& method, std::string& path) {
+        size_t method_end = request.find(' ');
+        std::string method_str = request.substr(0, method_end);
+        
+        // Convert method string to HttpMethod enum
+        method = StringToHttpMethod(method_str);
+
+        size_t path_start = request.find(' ', method_end) + 1;
+        size_t path_end = request.find(' ', path_start);
+        path = request.substr(path_start, path_end - path_start);
+    }
+
+    HttpMethod StringToHttpMethod(const std::string& method_str) {
+        if (method_str == "GET") return HttpMethod::GET;
+        else if (method_str == "POST") return HttpMethod::POST;
+        return HttpMethod::UNKNOWN; // or some default value
+    }
+
+    void HandleRequest(const HttpMethod& method, const std::string& path, const std::string& request, Response& response) {
+        RouteKey route_key = {path, method};
+        auto route_it = routes.find(route_key);
+        if (route_it != routes.end()) {
+            route_it->second(request, response);
+        } else {
+            // To-Do: Handle unknown routes or methods
+        }
+    }
+
+    void SendResponse(int socket, const Response& response) {
+        std::string response_str = response.ToString();
+        if (debugMode) std::cout << response_str << std::endl;
+        send(socket, response_str.c_str(), response_str.size(), 0);
+    }
+
     void HandleConnection(int socket) {
         bool keep_alive;
         Response response;
 
         do {
-            std::vector<char> buffer;
-            const size_t buffer_size = 1024;
-            size_t total_bytes_read = 0;
-            ssize_t bytes_read;
+            std::string request;
+            ReadRequest(socket, request);
+            if (request.empty()) return; // if reading request failed
 
-            // Read from the socket until the header is fully received
-            do {
-                buffer.resize(total_bytes_read + buffer_size);
-                bytes_read = read(socket, buffer.data() + total_bytes_read, buffer_size);
-                if (bytes_read > 0) total_bytes_read += bytes_read;
-            } while (bytes_read > 0 && BufferContainsIncompleteHeader(buffer));
-
-            // If there's an error reading from the socket, exit the function
-            if (bytes_read < 0) {
-                perror("read");
-                close(socket);
-                return;
-            }
-
-            // Convert the buffer to a string for easier processing
-            std::string request(buffer.begin(), buffer.begin() + total_bytes_read);
-            if (debugMode) std::cout << request << std::endl;
-
-            // Extract the request method and path from the request line
-            size_t method_end = request.find(' ');
-            std::string method_str = request.substr(0, method_end);
             HttpMethod method;
-            if (method_str == "GET") method = HttpMethod::GET;
-            else if (method_str == "POST") method = HttpMethod::POST;
-            else if (method_str == "PUT") method = HttpMethod::PUT;
-            else if (method_str == "DELETE") method = HttpMethod::DELETE;
-            else {
-                // Handle unknown methods
-                close(socket);
-                return;
-            }
+            std::string path;
+            ParseRequest(request, method, path);
+            
+            HandleRequest(method, path, request, response);
+            SendResponse(socket, response);
 
-            size_t path_start = request.find(' ', method_end) + 1;
-            size_t path_end = request.find(' ', path_start);
-            std::string path = request.substr(path_start, path_end - path_start);
-
-            // Find the handler for the route based on method and path
-            RouteKey route_key = {path, method};
-            auto route_it = routes.find(route_key);
-            if (route_it != routes.end()) {
-                // Call the associated handler, which now expects a Response reference
-                route_it->second(request, response);
-                
-                // Send the response back to the client
-                std::string response_str = response.ToString();
-                if (debugMode) std::cout << response_str << std::endl;
-                send(socket, response_str.c_str(), response_str.size(), 0);
-            } else {
-                // Handle unknown routes or methods
-            }
-
-            // Check if the client has requested to keep the connection alive
             keep_alive = GetHeaderValue(request, "Connection") == "keep-alive";
             if (keep_alive) response.AddHeader("Connection", "keep-alive");
 
-            // Send the response back to the client
-            std::string response_str = response.ToString();
-            if (debugMode) std::cout << response_str << std::endl;
-            send(socket, response_str.c_str(), response_str.size(), 0);
         } while (keep_alive);
 
-        // Close the socket after handling the connection
         close(socket);
     }
 };

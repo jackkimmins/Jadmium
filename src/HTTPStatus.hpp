@@ -6,7 +6,8 @@ enum class HttpMethod {
     GET,
     POST,
     PUT,
-    DELETE
+    DELETE,
+    UNKNOWN
 };
 
 const std::unordered_map<int, std::string> HTTP_STATUS = {
