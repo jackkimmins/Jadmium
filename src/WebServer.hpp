@@ -33,8 +33,8 @@ public:
         }
 
     public:
-        Response() {
-            SetStatusCode(200);
+        Response(int code = 200) {
+            SetStatusCode(code);
             AddHeader("Content-Type", "text/html");
             AddHeader("Server", "Jadmium");
         }
@@ -226,7 +226,7 @@ private:
     HttpMethod StringToHttpMethod(const std::string& method_str) {
         if (method_str == "GET") return HttpMethod::GET;
         else if (method_str == "POST") return HttpMethod::POST;
-        return HttpMethod::UNKNOWN; // or some default value
+        return HttpMethod::UNKNOWN;
     }
 
     void HandleRequest(const HttpMethod& method, const std::string& path, const std::string& request, Response& response) {
@@ -235,7 +235,10 @@ private:
         if (route_it != routes.end()) {
             route_it->second(request, response);
         } else {
-            // To-Do: Handle unknown routes or methods
+            // Create a Response
+            Response invalidRes(404);
+            invalidRes.SetBody("404 Not Found");
+            route_it->second(request, invalidRes);
         }
     }
 
