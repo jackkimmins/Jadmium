@@ -99,14 +99,14 @@ public:
         struct hostent *host_entry;
         int hostname;
 
-        // To retrieve hostname
+        // Retrieve hostname
         hostname = gethostname(hostbuffer, sizeof(hostbuffer));
         if (hostname == -1) {
             perror("gethostname");
             exit(EXIT_FAILURE);
         }
 
-        // To retrieve host information
+        // Retrieve host information
         host_entry = gethostbyname(hostbuffer);
         if (host_entry == NULL) {
             perror("gethostbyname");

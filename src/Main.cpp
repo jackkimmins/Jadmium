@@ -2,7 +2,7 @@
 #include "WebServer.hpp"
 
 int main() {
-    WebServer server(8080, 4);
+    WebServer server(3000, 4);
     
     // Add a route for the index page
     server.AddRoute(HttpMethod::GET, "/", [](auto& req, auto& res) {
