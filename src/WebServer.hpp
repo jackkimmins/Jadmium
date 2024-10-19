@@ -1,274 +1,322 @@
+#pragma once
+#ifndef WEBSERVER_HPP
+#define WEBSERVER_HPP
+
+#include <string>
+#include <functional>
+#include <unordered_map>
+#include <fstream>
+#include <sstream>
+#include <thread>
+#include <vector>
+#include <map>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
-#include <string.h>
-#include <iostream>
-#include <thread>
-#include <functional>
-#include <unordered_map>
-#include <vector>
-#include <netdb.h>
 #include <arpa/inet.h>
-#include <utility>
-#include <zlib.h>
+#include <cstring>
+#include <errno.h>
 
-#include "ThreadPool.hpp"
+#include <openssl/ssl.h>
+
+#include "HttpUtils.hpp"
 #include "Logger.hpp"
-#include "HTTPStatus.hpp"
+#include "SSLManager.hpp"
 
 class WebServer {
 public:
-    struct Response {
-    private:
-        std::string status_line;
-        std::unordered_map<std::string, std::string> headers;
-        std::string body;
-
-        // Set the status line based on the status code
-        void SetStatusLine(int code) {
-            auto it = HTTP_STATUS.find(code);
-            if (it == HTTP_STATUS.end()) code = 510;
-
-            status_line = "HTTP/1.1 " + std::to_string(code) + " " + HTTP_STATUS.at(code);
-        }
-
-    public:
-        Response(int code = 200) {
-            SetStatusCode(code);
-            AddHeader("Content-Type", "text/html");
-            AddHeader("Server", "Jadmium");
-        }
-
-        // Set the status code of the response
-        void SetStatusCode(int code) {
-            SetStatusLine(code);
-        }
-
-        // Redirect to another URL
-        void Redirect(const std::string& url, bool permanent = false) {
-            SetStatusCode(permanent ? 301 : 302);
-            AddHeader("Location", url);
-        }
-
-        // Set a HTTP Response header
-        void AddHeader(const std::string& key, const std::string& value) {
-            headers[key] = value;
-        }
-
-        // Set the body of the response
-        void SetBody(const std::string& bodyContent) {
-            body = bodyContent;
-        }
-
-        // Get the response as a string
-        std::string ToString() const {
-            std::string response = status_line + "\r\n";
-            for (const auto& [key, value] : headers) {
-                response += key + ": " + value + "\r\n";
-            }
-
-            if (headers.find("Content-Length") == headers.end() && !body.empty()) {
-                response += "Content-Length: " + std::to_string(body.size()) + "\r\n";
-            }
-
-            response += "\r\n" + body;
-            return response;
-        }
-    };
-
-    // Takes a request and response object
-    using RouteHandler = std::function<void(const std::string&, Response&)>;
-    using RouteKey = std::pair<std::string, HttpMethod>;
-
-    WebServer(int port, size_t threads) : server_fd(-1), port(port), thread_pool(threads) {
-        Setup();
-    }
-
-    ~WebServer() {
-        if (server_fd != -1) close(server_fd);
-    }
-
-    // Add a route to the server
-    void AddRoute(HttpMethod method, const std::string& path, const RouteHandler& handler) {
-        routes[{path, method}] = handler;
-    }
-
-    std::string GetHostIPAddress() {
-        char hostbuffer[256];
-        char *IPbuffer;
-        struct hostent *host_entry;
-        int hostname;
-
-        // Retrieve hostname
-        hostname = gethostname(hostbuffer, sizeof(hostbuffer));
-        if (hostname == -1) {
-            perror("gethostname");
-            exit(EXIT_FAILURE);
-        }
-
-        // Retrieve host information
-        host_entry = gethostbyname(hostbuffer);
-        if (host_entry == NULL) {
-            perror("gethostbyname");
-            exit(EXIT_FAILURE);
-        }
-
-        // To convert an Internet network address into ASCII string
-        IPbuffer = inet_ntoa(*((struct in_addr*)host_entry->h_addr_list[0]));
-        return IPbuffer;
-    }
-
-    // Start the server
-    void Run() {
-        std::string ip = GetHostIPAddress();
-        Logger::log("Jadmium Server is running at http://" + ip + ":" + std::to_string(port), Logger::Level::INFO);
-
-        while (true) {
-            int new_socket;
-            struct sockaddr_in address;
-            int addrlen = sizeof(address);
-            if ((new_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen)) < 0) {
-                perror("accept");
-                exit(EXIT_FAILURE);
-            }
-
-            thread_pool.enqueue(&WebServer::HandleConnection, this, new_socket);
-        }
-    }
+    WebServer(const std::string& host, int port, int threadCount);
+    ~WebServer();
+    void AddRoute(HttpMethod method, const std::string& path, std::function<void(HttpRequest&, HttpResponse&)> handler);
+    void Run();
 
 private:
-    struct pair_hash {
-        template <class T1, class T2>
-        std::size_t operator () (const std::pair<T1, T2>& pair) const {
-            auto hash1 = std::hash<T1>{}(pair.first);
-            auto hash2 = std::hash<T2>{}(pair.second);
-            return hash1 ^ hash2;
-        }
-    };
+    std::string host_;
+    int port_;
+    int threadCount_;
+    std::unordered_map<std::string, std::function<void(HttpRequest&, HttpResponse&)>> routes_;
+    SSLManager ssl_manager_;
 
-    int server_fd;
-    int port;
-    bool debugMode = false;
-    ThreadPool thread_pool;
-    std::unordered_map<RouteKey, RouteHandler, pair_hash> routes;
+    int server_fd_;
+    std::vector<std::thread> worker_threads_;
+    std::queue<int> client_queue_;
+    std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
+    bool is_running_;
 
-    void Setup() {
-        if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-            perror("socket failed");
-            exit(EXIT_FAILURE);
-        }
-
-        struct sockaddr_in address;
-        address.sin_family = AF_INET;
-        address.sin_addr.s_addr = INADDR_ANY;
-        address.sin_port = htons(port);
-
-        if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
-            perror("bind failed");
-            exit(EXIT_FAILURE);
-        }
-        if (listen(server_fd, 10) < 0) {
-            perror("listen");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    bool BufferContainsIncompleteHeader(const std::vector<char>& buffer) {
-        const std::string end_of_header = "\r\n\r\n";
-        auto it = std::search(buffer.begin(), buffer.end(), end_of_header.begin(), end_of_header.end());
-        return it == buffer.end();
-    }
-
-    static std::string GetHeaderValue(const std::string& request, const std::string& header_name) {
-        size_t start = request.find(header_name + ":");
-        if (start == std::string::npos) return "";
-
-        start += header_name.size() + 1;
-        size_t end = request.find("\r\n", start);
-        if (end == std::string::npos) return "";
-
-        return request.substr(start, end - start);
-    }
-
-    void ReadRequest(int socket, std::string& request) {
-        std::vector<char> buffer;
-        const size_t buffer_size = 1024;
-        size_t total_bytes_read = 0;
-        ssize_t bytes_read;
-
-        do {
-            buffer.resize(total_bytes_read + buffer_size);
-            bytes_read = read(socket, buffer.data() + total_bytes_read, buffer_size);
-            if (bytes_read > 0) total_bytes_read += bytes_read;
-        } while (bytes_read > 0 && BufferContainsIncompleteHeader(buffer));
-
-        if (bytes_read < 0) {
-            perror("read");
-            close(socket);
-            request = ""; // return an empty string to indicate failure
-        } else {
-            request.assign(buffer.begin(), buffer.begin() + total_bytes_read);
-        }
-    }
-
-    void ParseRequest(const std::string& request, HttpMethod& method, std::string& path) {
-        size_t method_end = request.find(' ');
-        std::string method_str = request.substr(0, method_end);
-        
-        // Convert method string to HttpMethod enum
-        method = StringToHttpMethod(method_str);
-
-        size_t path_start = request.find(' ', method_end) + 1;
-        size_t path_end = request.find(' ', path_start);
-        path = request.substr(path_start, path_end - path_start);
-    }
-
-    HttpMethod StringToHttpMethod(const std::string& method_str) {
-        if (method_str == "GET") return HttpMethod::GET;
-        else if (method_str == "POST") return HttpMethod::POST;
-        return HttpMethod::UNKNOWN;
-    }
-
-    void HandleRequest(const HttpMethod& method, const std::string& path, const std::string& request, Response& response) {
-        RouteKey route_key = {path, method};
-        auto route_it = routes.find(route_key);
-        if (route_it != routes.end()) {
-            route_it->second(request, response);
-        } else {
-            // Create a Response
-            Response invalidRes(404);
-            invalidRes.SetBody("404 Not Found");
-            route_it->second(request, invalidRes);
-        }
-    }
-
-    void SendResponse(int socket, const Response& response) {
-        std::string response_str = response.ToString();
-        if (debugMode) std::cout << response_str << std::endl;
-        send(socket, response_str.c_str(), response_str.size(), 0);
-    }
-
-    void HandleConnection(int socket) {
-        bool keep_alive;
-        Response response;
-
-        do {
-            std::string request;
-            ReadRequest(socket, request);
-            if (request.empty()) return; // if reading request failed
-
-            HttpMethod method;
-            std::string path;
-            ParseRequest(request, method, path);
-            
-            HandleRequest(method, path, request, response);
-            SendResponse(socket, response);
-
-            keep_alive = GetHeaderValue(request, "Connection") == "keep-alive";
-            if (keep_alive) response.AddHeader("Connection", "keep-alive");
-
-        } while (keep_alive);
-
-        close(socket);
-    }
+    void WorkerThread();
+    void EnqueueClient(int client_socket);
+    void HandleClient(int client_socket);
+    HttpRequest ParseRequest(const std::string& requestStr);
+    std::string GetMethodString(HttpMethod method);
+    void SetupSocket();
 };
+
+WebServer::WebServer(const std::string& host, int port, int threadCount) : host_(host), port_(port), threadCount_(threadCount), is_running_(false) {}
+
+WebServer::~WebServer() {
+    is_running_ = false;
+    queue_cv_.notify_all();
+    for (auto& thread : worker_threads_) if (thread.joinable()) thread.join();
+    if (server_fd_ >= 0) close(server_fd_);
+}
+
+void WebServer::AddRoute(HttpMethod method, const std::string& path, std::function<void(HttpRequest&, HttpResponse&)> handler) {
+    std::string key = GetMethodString(method) + ":" + path;
+    routes_[key] = handler;
+}
+
+std::string WebServer::GetMethodString(HttpMethod method) {
+    switch (method) {
+        case HttpMethod::GET:     return "GET";
+        case HttpMethod::POST:    return "POST";
+        case HttpMethod::PUT:     return "PUT";
+        case HttpMethod::DELETE:  return "DELETE";
+        default:                  return "UNKNOWN";
+    }
+}
+
+void WebServer::SetupSocket() {
+    int opt = 1;
+    struct sockaddr_in address;
+
+    if ((server_fd_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == 0) {
+        Logger::log("Socket creation failed: " + std::string(strerror(errno)), Logger::Level::ERROR);
+        exit(EXIT_FAILURE);
+    }
+
+    if (setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
+        Logger::log("setsockopt failed: " + std::string(strerror(errno)), Logger::Level::ERROR);
+        exit(EXIT_FAILURE);
+    }
+
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port_);
+
+    if (host_ == "*" || host_.empty()) {
+        address.sin_addr.s_addr = INADDR_ANY;
+    } else {
+        if (inet_pton(AF_INET, host_.c_str(), &address.sin_addr) <= 0) {
+            Logger::log("Invalid address: " + host_, Logger::Level::ERROR);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    if (bind(server_fd_, (struct sockaddr*)&address, sizeof(address)) < 0) {
+        Logger::log("Bind failed: " + std::string(strerror(errno)), Logger::Level::ERROR);
+        exit(EXIT_FAILURE);
+    }
+
+    if (listen(server_fd_, SOMAXCONN) < 0) {
+        Logger::log("Listen failed: " + std::string(strerror(errno)), Logger::Level::ERROR);
+        exit(EXIT_FAILURE);
+    }
+}
+
+void WebServer::Run() {
+    SetupSocket();
+
+    std::string display_host = (host_ == "*" || host_.empty()) ? "0.0.0.0" : host_;
+    Logger::log("Server is listening at https://" + display_host + ":" + std::to_string(port_), Logger::Level::INFO);
+
+    is_running_ = true;
+
+    // Start workers
+    for (int i = 0; i < threadCount_; ++i) worker_threads_.emplace_back(&WebServer::WorkerThread, this);
+
+    while (is_running_) {
+        int client_socket;
+        struct sockaddr_in client_address;
+        socklen_t client_len = sizeof(client_address);
+
+        client_socket = accept(server_fd_, (struct sockaddr*)&client_address, &client_len);
+        if (client_socket < 0) {
+            Logger::log("Accept failed: " + std::string(strerror(errno)), Logger::Level::ERROR);
+            continue;
+        }
+
+        EnqueueClient(client_socket);
+    }
+
+    close(server_fd_);
+    for (auto& thread : worker_threads_) thread.join();
+}
+
+void WebServer::EnqueueClient(int client_socket) {
+    std::unique_lock<std::mutex> lock(queue_mutex_);
+    client_queue_.push(client_socket);
+    queue_cv_.notify_one();
+}
+
+void WebServer::WorkerThread() {
+    while (is_running_) {
+        int client_socket;
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            queue_cv_.wait(lock, [this]() { return !client_queue_.empty() || !is_running_; });
+            if (!is_running_) break;
+            client_socket = client_queue_.front();
+            client_queue_.pop();
+        }
+
+        HandleClient(client_socket);
+    }
+}
+
+void WebServer::HandleClient(int client_socket) {
+    const int buffer_size = 8192;
+    char buffer[buffer_size];
+    int bytes_read;
+
+    // Peek at the first byte to determine if it's an SSL/TLS handshake
+    unsigned char first_byte;
+    int peek_result = recv(client_socket, &first_byte, 1, MSG_PEEK);
+    if (peek_result <= 0) {
+        close(client_socket);
+        return;
+    }
+
+    bool use_ssl = (first_byte == 0x16); // 0x16 indicates TLS handshake
+
+    std::string requestStr;
+    if (use_ssl) {
+        SSL* ssl = SSL_new(ssl_manager_.GetContext());
+        SSL_set_fd(ssl, client_socket);
+
+        if (SSL_accept(ssl) <= 0) {
+            unsigned long err_code = ERR_get_error();
+            int reason = ERR_GET_REASON(err_code);
+
+            // Suppress cert errors
+            if (reason != SSL_R_TLSV1_ALERT_UNKNOWN_CA &&
+                reason != SSL_R_SSLV3_ALERT_CERTIFICATE_UNKNOWN &&
+                reason != SSL_R_SSLV3_ALERT_NO_CERTIFICATE) {
+                char buf[256];
+                ERR_error_string_n(err_code, buf, sizeof(buf));
+                Logger::log("SSL accept failed: " + std::string(buf), Logger::Level::SSL);
+            }
+
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
+            close(client_socket);
+            return;
+        }
+
+        bytes_read = SSL_read(ssl, buffer, buffer_size);
+        if (bytes_read <= 0) {
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
+            close(client_socket);
+            return;
+        }
+
+        requestStr = std::string(buffer, bytes_read);
+
+        HttpRequest request = ParseRequest(requestStr);
+
+        // Log the request
+        Logger::log("[REQ]: " + GetMethodString(request.method) + " " + request.path, Logger::Level::INFO);
+
+        HttpResponse response;
+
+        std::string routeKey = GetMethodString(request.method) + ":" + request.path;
+        if (routes_.find(routeKey) != routes_.end()) {
+            routes_[routeKey](request, response);
+        } else {
+            response.SetStatusCode(404);
+            response.SetBody("Not Found");
+        }
+
+        // Set Server header
+        response.SetHeader("Server", "Jadmium");
+
+        std::string responseStr = response.ToString();
+        SSL_write(ssl, responseStr.c_str(), responseStr.length());
+
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
+        close(client_socket);
+
+    } else {
+        bytes_read = recv(client_socket, buffer, buffer_size, 0);
+        if (bytes_read <= 0) {
+            close(client_socket);
+            return;
+        }
+
+        requestStr = std::string(buffer, bytes_read);
+        HttpRequest request = ParseRequest(requestStr);
+
+        // Log the request
+        Logger::log("[REQ]: " + GetMethodString(request.method) + " " + request.path, Logger::Level::INFO);
+
+        // Get the Host header
+        std::string host = request.headers["Host"];
+        if (host.empty()) host = "localhost";
+
+        // Construct the redirect URL using the Host header and request path
+        std::string redirectUrl = "https://" + host + request.path;
+
+        // Send HTTP redirect response to HTTPS
+        HttpResponse response;
+        response.SetStatusCode(301);
+        response.SetHeader("Location", redirectUrl);
+        // Set Server header
+        response.SetHeader("Server", "Jadmium");
+        response.SetBody(""); // Empty body
+        std::string responseStr = response.ToString();
+
+        send(client_socket, responseStr.c_str(), responseStr.length(), 0);
+        close(client_socket);
+    }
+}
+
+HttpRequest WebServer::ParseRequest(const std::string& requestStr) {
+    HttpRequest request;
+    std::istringstream stream(requestStr);
+    std::string line;
+
+    // Get the request line
+    if (std::getline(stream, line)) {
+        std::istringstream requestLine(line);
+        std::string methodStr, path, version;
+
+        requestLine >> methodStr >> path >> version;
+
+        // Convert method string to HttpMethod
+        if (methodStr == "GET") request.method = HttpMethod::GET;
+        else if (methodStr == "POST") request.method = HttpMethod::POST;
+        else if (methodStr == "PUT") request.method = HttpMethod::PUT;
+        else if (methodStr == "DELETE") request.method = HttpMethod::DELETE;
+        else request.method = HttpMethod::UNKNOWN;
+
+        request.path = path;
+    }
+
+    // Get headers
+    while (std::getline(stream, line) && line != "\r") {
+        if (line.back() == '\r') line.pop_back();
+        auto colonPos = line.find(":");
+        if (colonPos != std::string::npos) {
+            std::string headerName = line.substr(0, colonPos);
+            std::string headerValue = line.substr(colonPos + 1);
+            if (!headerValue.empty() && headerValue[0] == ' ') headerValue.erase(0, 1);
+            request.headers[headerName] = headerValue;
+        }
+    }
+
+    // Get body
+    if (request.headers.find("Content-Length") != request.headers.end()) {
+        int contentLength = std::stoi(request.headers["Content-Length"]);
+        std::string body(contentLength, '\0');
+        stream.read(&body[0], contentLength);
+        request.body = body;
+    }
+
+    return request;
+}
+
+#endif // WEBSERVER_HPP

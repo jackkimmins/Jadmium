@@ -6,12 +6,15 @@ CPP_SOURCES = $(wildcard $(SRC_DIR)/*.cpp)
 HPP_HEADERS = $(wildcard $(SRC_DIR)/*.hpp)
 OBJECTS = $(CPP_SOURCES:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
 BINARY = $(BUILD_DIR)/webserver
-LIBS = -lpthread -lz
+LIBS = -lpthread -lz -lssl -lcrypto  # Added -lssl and -lcrypto
+
 $(shell mkdir -p $(BUILD_DIR))
 
 all: $(BINARY)
+
 $(BINARY): $(OBJECTS)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
+
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp $(HPP_HEADERS)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 

@@ -1,9 +1,11 @@
+#pragma once
 #include <iostream>
 #include <string>
 
 class Logger {
 public:
     enum class Level {
+        SSL,
         INFO,
         WARNING,
         ERROR,
@@ -13,6 +15,9 @@ public:
         switch (level) {
             case Level::INFO:
                 std::cout << "\033[32m[INFO]\033[0m " << message << std::endl; // Green
+                break;
+            case Level::SSL:
+                std::cout << "\033[35m[SSL]\033[0m " << message << std::endl; // Magenta
                 break;
             case Level::WARNING:
                 std::cout << "\033[33m[WARNING]\033[0m " << message << std::endl; // Yellow
