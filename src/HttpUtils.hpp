@@ -94,11 +94,8 @@ public:
 private:
     std::string GetStatusMessage(int code) const {
         auto it = HTTP_STATUS.find(code);
-        if (it != HTTP_STATUS.end()) {
-            return it->second;
-        } else {
-            return "Unknown";
-        }
+        if (it != HTTP_STATUS.end()) return it->second;
+        else return "Unknown";
     }
 };
 
